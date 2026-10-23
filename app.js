@@ -5,7 +5,7 @@ import { CONFIG } from './config.js';
 import { createStore } from './store.js';
 
 const html = htm.bind(h);
-const EMPTY = { projects: [], project_members: [], tasks: [], notes: [], submissions: [] };
+const EMPTY = { projects: [], project_members: [], tasks: [], notes: [], submissions: [], owners: [] };
 
 // Projects and grants share one table and one set of screens; these settings
 // are what differ between the two boards.
@@ -465,7 +465,8 @@ function ProjectDetail({ p, data, role, user, api, onClose, onDelete }) {
   const isAdmin = role === 'admin';
   const save = (patch) => api.update('projects', p.id, patch);
   const members = data.project_members.filter((m) => m.project_id === p.id);
-  const listId = `people-${p.id}`;
+  // Who tasks can be assigned to: owners (who see everything) plus everyone shared on this item.
+  const people = [...new Set([...(data.owners || []), ...(isAdmin ? [user.email] : []), ...members.map((m) => m.email)])];
   const kind = kindOf(p);
   const { stages, noun } = KINDS[kind];
   const stageKnown = stages.some((s) => s.id === p.stage);
@@ -497,8 +498,6 @@ function ProjectDetail({ p, data, role, user, api, onClose, onDelete }) {
         <span class="muted">Updated ${timeAgo(p.updated_at)}</span>
       </div>
 
-      <datalist id=${listId}>${members.map((m) => html`<option value=${m.email} />`)}<option value=${user.email} /></datalist>
-
       <div class="drawer-body">
         <${Section} title="Overview">
           <label class="field"><span>${kind === 'grant' ? 'Summary / specific aims' : 'Summary / aims'}</span>
@@ -514,7 +513,7 @@ function ProjectDetail({ p, data, role, user, api, onClose, onDelete }) {
             </div>`}
         </${Section}>
 
-        <${Tasks} p=${p} data=${data} canEdit=${canEdit} api=${api} listId=${listId} />
+        <${Tasks} p=${p} data=${data} canEdit=${canEdit} api=${api} people=${people} me=${user.email} />
         <${Notes} p=${p} data=${data} canEdit=${canEdit} user=${user} api=${api} />
         <${Submissions} p=${p} kind=${kind} data=${data} canEdit=${canEdit} api=${api} />
         <${Links} p=${p} canEdit=${canEdit} save=${save} />
@@ -555,7 +554,21 @@ function GrantFields({ p, canEdit, save }) {
   </div>`;
 }
 
-function Tasks({ p, data, canEdit, api, listId }) {
+// Dropdown of the people who can see this item, so tasks always land in
+// someone's "Assigned to me" list. An old free-text value (e.g. a typed name, or
+// someone since removed from the project) stays visible until it's changed.
+function AssigneeSelect({ value, people, me, disabled, onSave }) {
+  const current = value || '';
+  const label = (email) => (email === me ? `Me (${shortName(email)})` : email);
+  return html`<select class="assignee" value=${current} disabled=${disabled} aria-label="Assignee" title=${current}
+    onChange=${(e) => onSave(e.target.value)}>
+    <option value="">Unassigned</option>
+    ${current && !people.includes(current) && html`<option value=${current}>${current} (not on project)</option>`}
+    ${people.map((email) => html`<option value=${email}>${label(email)}</option>`)}
+  </select>`;
+}
+
+function Tasks({ p, data, canEdit, api, people, me }) {
   const all = data.tasks.filter((t) => t.project_id === p.id);
   const top = all.filter((t) => !t.parent_id).sort(byPos);
   const kids = (id) => all.filter((t) => t.parent_id === id).sort(byPos);
@@ -567,7 +580,7 @@ function Tasks({ p, data, canEdit, api, listId }) {
   return html`<${Section} title="Tasks" aside=${all.length ? `${done}/${all.length} done` : ''}>
     ${all.length > 0 && html`<div class="progress big"><div style=${{ width: `${(100 * done) / all.length}%` }}></div></div>`}
     <ul class="tasks">
-      ${top.map((t) => html`<${TaskRow} key=${t.id} t=${t} subtasks=${kids(t.id)} canEdit=${canEdit} api=${api} listId=${listId}
+      ${top.map((t) => html`<${TaskRow} key=${t.id} t=${t} subtasks=${kids(t.id)} canEdit=${canEdit} api=${api} people=${people} me=${me}
         onAddSub=${(title) => add(title, t.id)} />`)}
     </ul>
     ${canEdit ? html`<${AddLine} placeholder="+ Add a task and press Enter" onAdd=${(title) => add(title)} />`
@@ -575,7 +588,7 @@ function Tasks({ p, data, canEdit, api, listId }) {
   </${Section}>`;
 }
 
-function TaskRow({ t, subtasks = [], depth = 0, canEdit, api, listId, onAddSub }) {
+function TaskRow({ t, subtasks = [], depth = 0, canEdit, api, people, me, onAddSub }) {
   const [adding, setAdding] = useState(false);
   const up = (patch) => api.update('tasks', t.id, patch);
   const del = () => {
@@ -587,15 +600,14 @@ function TaskRow({ t, subtasks = [], depth = 0, canEdit, api, listId, onAddSub }
       <input type="checkbox" checked=${t.done} disabled=${!canEdit} aria-label="Done" onChange=${(e) => up({ done: e.target.checked })} />
       <${Text} class="task-title" value=${t.title} disabled=${!canEdit} aria-label="Task" onSave=${(v) => up({ title: v })} />
       <div class="task-meta">
-        <${Text} class="assignee" value=${t.assignee} list=${listId} disabled=${!canEdit} placeholder="Assignee" aria-label="Assignee"
-          onSave=${(v) => up({ assignee: v.includes('@') ? v.trim().toLowerCase() : v.trim() })} />
+        <${AssigneeSelect} value=${t.assignee} people=${people} me=${me} disabled=${!canEdit} onSave=${(v) => up({ assignee: v })} />
         <${DateInput} value=${t.due_date} disabled=${!canEdit} late=${!t.done && isOverdue(t.due_date)} aria-label="Due date" onSave=${(v) => up({ due_date: v })} />
         ${canEdit && depth === 0 && html`<button class="icon" title="Add subtask" aria-label="Add subtask" onClick=${() => setAdding(true)}>＋</button>`}
         ${canEdit && html`<button class="icon" title="Delete" aria-label="Delete task" onClick=${del}>✕</button>`}
       </div>
     </div>
     ${(subtasks.length > 0 || adding) && html`<ul class="subtasks">
-      ${subtasks.map((s) => html`<${TaskRow} key=${s.id} t=${s} depth=${1} canEdit=${canEdit} api=${api} listId=${listId} />`)}
+      ${subtasks.map((s) => html`<${TaskRow} key=${s.id} t=${s} depth=${1} canEdit=${canEdit} api=${api} people=${people} me=${me} />`)}
       ${adding && html`<li key="adder"><${AddLine} autoFocus placeholder="Subtask, then Enter (Esc to stop)" onAdd=${onAddSub} onDone=${() => setAdding(false)} /></li>`}
     </ul>`}
   </li>`;

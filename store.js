@@ -2,7 +2,7 @@
 // which one it talks to:
 //   getUser() → { email, isAdmin } | null      onAuth(cb) → unsubscribe
 //   signIn(email)  signOut()
-//   loadAll() → { projects, project_members, tasks, notes, submissions }
+//   loadAll() → { projects, project_members, tasks, notes, submissions, owners }
 //   insert(table, row) → row   update(table, id, patch)   remove(table, id)
 //   subscribe(cb) → unsubscribe   (cb fires whenever anyone changes data)
 
@@ -54,12 +54,17 @@ class SupabaseStore {
   }
 
   async loadAll() {
-    const results = await Promise.all(TABLES.map((t) => this.sb.from(t).select('*')));
+    const [owners, ...results] = await Promise.all([
+      this.sb.rpc('owner_emails'),
+      ...TABLES.map((t) => this.sb.from(t).select('*')),
+    ]);
     const out = {};
     results.forEach((r, i) => {
       if (r.error) throw r.error;
       out[TABLES[i]] = r.data;
     });
+    // Before 2026-10-owner-list.sql is run the function is missing; just leave owners out.
+    out.owners = owners.error ? [] : owners.data;
     return out;
   }
 
@@ -172,6 +177,7 @@ class DemoStore {
       tasks: d.tasks.filter((r) => visible(r.project_id)),
       notes: d.notes.filter((r) => visible(r.project_id)),
       submissions: d.submissions.filter((r) => visible(r.project_id)),
+      owners: this.users.filter((u) => u.isAdmin).map((u) => u.email),
     });
   }
 
