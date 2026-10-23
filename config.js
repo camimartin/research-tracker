@@ -8,7 +8,7 @@
 // security policies in supabase/schema.sql, not by keeping this key secret.
 
 export const CONFIG = {
-  programName: 'Research Program',
+  programName: 'Martin Lab Research Program',
 
   supabaseUrl: 'https://qbyrcbqwjpkfkzhndufq.supabase.co',
   supabaseAnonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFieXJjYnF3anBrZmt6aG5kdWZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI3NjM1NjMsImV4cCI6MjEwODMzOTU2M30.CnZIMqXK34wqeq-DWfYMrfHXu-dc9e7k5EhBRL1prpo',
