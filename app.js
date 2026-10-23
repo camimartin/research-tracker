@@ -143,6 +143,7 @@ function App({ store }) {
   const [openId, setOpenId] = useState(parseHash);
   const [query, setQuery] = useState('');
   const [person, setPerson] = useState('');
+  const [lead, setLead] = useState(''); // lowercase lead name; not remembered, so a 1:1 filter doesn't linger
   const [showArchived, setShowArchived] = useState(false);
   const [showTasks, setShowTasksState] = useState(() => readPref('research-tracker-card-tasks', 'on') === 'on');
   const setShowTasks = (on) => { setShowTasksState(on); writePref('research-tracker-card-tasks', on ? 'on' : 'off'); };
@@ -244,10 +245,18 @@ function App({ store }) {
   if (user === null) return html`<${Login} store=${store} />`;
 
   const people = [...new Set(data.project_members.map((m) => m.email))].sort();
+  // Lead names as typed, merged regardless of capitals/extra spaces: lowercase key → display name.
+  const leads = new Map();
+  for (const p of data.projects) {
+    const name = (p.lead || '').trim();
+    if (name && !leads.has(name.toLowerCase())) leads.set(name.toLowerCase(), name);
+  }
+  const leadOptions = [...leads].sort((a, b) => a[1].localeCompare(b[1]));
   const q = query.trim().toLowerCase();
   const projects = data.projects.filter((p) =>
     (showArchived || !p.archived) &&
     (!person || data.project_members.some((m) => m.project_id === p.id && m.email === person)) &&
+    (!lead || (p.lead || '').trim().toLowerCase() === lead) &&
     (!q || [p.title, p.summary, p.lead, p.target_journal, p.funder, p.mechanism, ...(p.tags || [])].join(' ').toLowerCase().includes(q)));
   const current = openId && data.projects.find((p) => p.id === openId);
   const boardKind = view === 'grant' ? 'grant' : 'project';
@@ -263,6 +272,12 @@ function App({ store }) {
       </nav>
       <div class="filters">
         <input class="search" type="search" placeholder="Search…" value=${query} onInput=${(e) => setQuery(e.target.value)} />
+        ${leadOptions.length > 0 && html`
+          <select class="lead-filter ${lead ? 'active' : ''}" value=${lead} onChange=${(e) => setLead(e.target.value)} aria-label="Filter by lead">
+            <option value="">Lead: Everyone</option>
+            ${lead && !leads.has(lead) && html`<option value=${lead}>Lead: ${lead}</option>`}
+            ${leadOptions.map(([key, name]) => html`<option value=${key}>Lead: ${name}</option>`)}
+          </select>`}
         ${user.isAdmin && people.length > 0 && html`
           <select class="person" value=${person} onChange=${(e) => setPerson(e.target.value)} aria-label="Filter by collaborator">
             <option value="">All collaborators</option>
