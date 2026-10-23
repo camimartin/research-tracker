@@ -144,13 +144,15 @@ function App({ store }) {
   const [query, setQuery] = useState('');
   const [person, setPerson] = useState('');
   const [showArchived, setShowArchived] = useState(false);
-  const [toast, setToast] = useState(null);
+  const [showTasks, setShowTasksState] = useState(() => readPref('research-tracker-card-tasks', 'on') === 'on');
+  const setShowTasks = (on) => { setShowTasksState(on); writePref('research-tracker-card-tasks', on ? 'on' : 'off'); };
+  const [toast, setToast] = useState(null); // { msg, action?: { label, run } }
   const toastTimer = useRef();
 
-  const notify = useCallback((msg) => {
-    setToast(msg);
+  const notify = useCallback((msg, action) => {
+    setToast({ msg, action });
     clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), 4500);
+    toastTimer.current = setTimeout(() => setToast(null), action ? 7000 : 4500);
   }, []);
 
   const refresh = useCallback(async () => {
@@ -221,6 +223,12 @@ function App({ store }) {
     } catch (e) { notify(e.message); }
   };
 
+  // Ticking a task on a board card hides it, so offer a quick undo.
+  const completeTask = (t) => {
+    api.update('tasks', t.id, { done: true });
+    notify(`Marked “${t.title}” done`, { label: 'Undo', run: () => api.update('tasks', t.id, { done: false }) });
+  };
+
   const deleteProject = (p) => {
     if (!confirm(`Delete "${p.title}" and all of its tasks, notes and submissions? This cannot be undone.`)) return;
     open(null);
@@ -255,6 +263,7 @@ function App({ store }) {
             <option value="">All collaborators</option>
             ${people.map((e) => html`<option value=${e}>${e}</option>`)}
           </select>`}
+        ${view !== 'tasks' && html`<label class="check"><input type="checkbox" checked=${showTasks} onChange=${(e) => setShowTasks(e.target.checked)} /> Show tasks</label>`}
         <label class="check"><input type="checkbox" checked=${showArchived} onChange=${(e) => setShowArchived(e.target.checked)} /> Archived</label>
       </div>
       <div class="actions">
@@ -269,6 +278,7 @@ function App({ store }) {
       ${view === 'tasks'
         ? html`<${TaskList} data=${data} projects=${projects} user=${user} roleOf=${roleOf} api=${api} onOpen=${open} />`
         : html`<${Board} key=${boardKind} kind=${boardKind} projects=${projects.filter((p) => kindOf(p) === boardKind)} data=${data} roleOf=${roleOf} onOpen=${open}
+            showTasks=${showTasks} onTaskDone=${completeTask}
             onMove=${(id, stage, position) => api.update('projects', id, { stage, position })} />`}
       ${view !== 'tasks' && !hasAny && html`
         <div class="blank">
@@ -280,7 +290,10 @@ function App({ store }) {
 
     ${current && html`<${ProjectDetail} key=${current.id} p=${current} data=${data} role=${roleOf(current.id)}
       user=${user} api=${api} onClose=${() => open(null)} onDelete=${() => deleteProject(current)} />`}
-    ${toast && html`<div class="toast" role="status">${toast}</div>`}
+    ${toast && html`<div class="toast" role="status">
+      <span>${toast.msg}</span>
+      ${toast.action && html`<button onClick=${() => { toast.action.run(); setToast(null); }}>${toast.action.label}</button>`}
+    </div>`}
   `;
 }
 
@@ -332,7 +345,7 @@ function Login({ store }) {
 
 // ── Board ──────────────────────────────────────────────────────────────────
 
-function Board({ kind, projects, data, roleOf, onOpen, onMove }) {
+function Board({ kind, projects, data, roleOf, onOpen, onMove, showTasks, onTaskDone }) {
   const STAGES = KINDS[kind].stages;
   const [dragId, setDragId] = useState(null);
   const [over, setOver] = useState(null);
@@ -365,6 +378,7 @@ function Board({ kind, projects, data, roleOf, onOpen, onMove }) {
         <h2><span class="dot"></span>${s.label}<span class="count">${items.length}</span></h2>
         <div class="cards">
           ${items.map((p) => html`<${Card} key=${p.id} p=${p} data=${data} role=${roleOf(p.id)} onOpen=${onOpen}
+            showTasks=${showTasks} onTaskDone=${onTaskDone}
             dragging=${dragId === p.id}
             onDragStart=${(e) => { e.dataTransfer.setData('text/plain', p.id); e.dataTransfer.effectAllowed = 'move'; setDragId(p.id); }}
             onDragEnd=${() => { setDragId(null); setOver(null); }}
@@ -376,11 +390,31 @@ function Board({ kind, projects, data, roleOf, onOpen, onMove }) {
   </div>`;
 }
 
-function Card({ p, data, role, onOpen, dragging, onDragStart, onDragEnd, onDrop }) {
+const CARD_TASK_LIMIT = 5;
+const fmtShort = (d) => new Date(d + 'T00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+// Open tasks on a board card, most urgent first, tickable without opening the project.
+function CardTasks({ open, canEdit, onTaskDone }) {
+  const shown = open.slice(0, CARD_TASK_LIMIT);
+  return html`<ul class="card-tasks">
+    ${shown.map((t) => html`<li key=${t.id}>
+      <input type="checkbox" disabled=${!canEdit} aria-label=${`Mark “${t.title}” done`}
+        onClick=${(e) => e.stopPropagation()} onChange=${() => onTaskDone(t)} />
+      <span class="ct-title">${t.parent_id ? html`<span class="muted">↳ </span>` : null}${t.title || 'Untitled task'}</span>
+      ${t.assignee && html`<${Avatar} who=${t.assignee} />`}
+      ${t.due_date && html`<span class="ct-due ${isOverdue(t.due_date) ? 'late' : ''}">${fmtShort(t.due_date)}</span>`}
+    </li>`)}
+    ${open.length > shown.length && html`<li class="ct-more">+${open.length - shown.length} more</li>`}
+  </ul>`;
+}
+
+function Card({ p, data, role, onOpen, dragging, onDragStart, onDragEnd, onDrop, showTasks, onTaskDone }) {
   const tasks = data.tasks.filter((t) => t.project_id === p.id);
   const done = tasks.filter((t) => t.done).length;
   const members = data.project_members.filter((m) => m.project_id === p.id);
-  const next = tasks.filter((t) => !t.done && t.due_date).sort((a, b) => a.due_date.localeCompare(b.due_date))[0];
+  const open = tasks.filter((t) => !t.done)
+    .sort((a, b) => (a.due_date || '9999').localeCompare(b.due_date || '9999') || a.position - b.position);
+  const next = open.find((t) => t.due_date);
   const notes = data.notes.filter((n) => n.project_id === p.id).length;
   const canDrag = role === 'admin' || role === 'editor';
   return html`<article class="card ${p.archived ? 'archived' : ''} ${dragging ? 'dragging' : ''}" tabindex="0"
@@ -391,10 +425,11 @@ function Card({ p, data, role, onOpen, dragging, onDragStart, onDragEnd, onDrop 
       : (p.lead || p.target_journal) && html`<p class="meta">${[p.lead, p.target_journal].filter(Boolean).join(' · ')}</p>`}
     ${p.tags?.length > 0 && html`<div class="tags">${p.tags.map((t) => html`<span class="tag">${t}</span>`)}</div>`}
     ${tasks.length > 0 && html`<div class="progress" title="${done} of ${tasks.length} tasks done"><div style=${{ width: `${(100 * done) / tasks.length}%` }}></div></div>`}
+    ${showTasks && open.length > 0 && html`<${CardTasks} open=${open} canEdit=${canDrag} onTaskDone=${onTaskDone} />`}
     <footer>
       <span class="stat">${tasks.length ? `${done}/${tasks.length} tasks` : 'No tasks'}</span>
       ${notes > 0 && html`<span class="stat">${notes} note${notes > 1 ? 's' : ''}</span>`}
-      ${next && html`<span class="stat ${isOverdue(next.due_date) ? 'late' : ''}">Due ${fmtDate(next.due_date)}</span>`}
+      ${!showTasks && next && html`<span class="stat ${isOverdue(next.due_date) ? 'late' : ''}">Due ${fmtDate(next.due_date)}</span>`}
       ${p.archived && html`<span class="badge">Archived</span>`}
       ${role === 'viewer' && html`<span class="badge">View only</span>`}
       <span class="avatars">${members.slice(0, 4).map((m) => html`<${Avatar} who=${m.email} />`)}${members.length > 4 && html`<span class="av more">+${members.length - 4}</span>`}</span>

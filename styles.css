@@ -301,11 +301,24 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; position: 
 .login-card input, .login-card button { width: 100%; padding: 10px 12px; }
 .login-card img { align-self: center; }
 
+/* Tasks listed on board cards */
+.card-tasks { list-style: none; margin: 2px 0 8px; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.card-tasks li { display: flex; align-items: center; gap: 6px; font-size: 12.5px; line-height: 1.3; min-width: 0; }
+.card-tasks input[type="checkbox"] { width: 14px; height: 14px; margin: 0; flex: none; accent-color: var(--ok); cursor: pointer; }
+.card-tasks input[type="checkbox"]:disabled { cursor: default; }
+.ct-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-tasks .av { width: 18px; height: 18px; font-size: 8px; border-width: 1px; }
+.ct-due { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.ct-due.late { color: var(--late); font-weight: 600; }
+.ct-more { color: var(--muted); font-size: 11.5px; padding-left: 20px; }
+
 .toast {
+  display: flex; align-items: center; gap: 14px;
   position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 20;
   background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 10px; box-shadow: var(--shadow-lg);
   max-width: calc(100vw - 32px);
 }
+.toast button { color: inherit; font-weight: 700; padding: 2px 8px; border: 1px solid currentColor; border-radius: 6px; flex: none; }
 
 /* Phone */
 @media (max-width: 720px) {
@@ -315,6 +328,9 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; position: 
   .search { flex: 1; width: auto; }
   .person { display: none; }
   .actions { margin-left: auto; }
+  .card-tasks { gap: 6px; }
+  .card-tasks li { font-size: 13.5px; }
+  .card-tasks input[type="checkbox"] { width: 20px; height: 20px; }
   .stage-jump { display: flex; gap: 6px; overflow-x: auto; padding: 10px 16px 0; scrollbar-width: none; }
   .stage-jump button {
     display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex: none;
