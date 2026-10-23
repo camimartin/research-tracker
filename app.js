@@ -146,6 +146,11 @@ function App({ store }) {
   const [showArchived, setShowArchived] = useState(false);
   const [showTasks, setShowTasksState] = useState(() => readPref('research-tracker-card-tasks', 'on') === 'on');
   const setShowTasks = (on) => { setShowTasksState(on); writePref('research-tracker-card-tasks', on ? 'on' : 'off'); };
+  const [sortBy, setSortByState] = useState(() => {
+    const v = readPref('research-tracker-sort', 'manual');
+    return ['manual', 'az', 'due'].includes(v) ? v : 'manual';
+  });
+  const setSortBy = (v) => { setSortByState(v); writePref('research-tracker-sort', v); };
   const [toast, setToast] = useState(null); // { msg, action?: { label, run } }
   const toastTimer = useRef();
 
@@ -263,7 +268,13 @@ function App({ store }) {
             <option value="">All collaborators</option>
             ${people.map((e) => html`<option value=${e}>${e}</option>`)}
           </select>`}
-        ${view !== 'tasks' && html`<label class="check"><input type="checkbox" checked=${showTasks} onChange=${(e) => setShowTasks(e.target.checked)} /> Show tasks</label>`}
+        ${view !== 'tasks' && html`
+          <select class="sort" value=${sortBy} onChange=${(e) => setSortBy(e.target.value)} aria-label="Sort cards">
+            <option value="manual">Sort: Manual order</option>
+            <option value="az">Sort: A–Z</option>
+            <option value="due">Sort: Next due date</option>
+          </select>
+          <label class="check"><input type="checkbox" checked=${showTasks} onChange=${(e) => setShowTasks(e.target.checked)} /> Show tasks</label>`}
         <label class="check"><input type="checkbox" checked=${showArchived} onChange=${(e) => setShowArchived(e.target.checked)} /> Archived</label>
       </div>
       <div class="actions">
@@ -278,7 +289,7 @@ function App({ store }) {
       ${view === 'tasks'
         ? html`<${TaskList} data=${data} projects=${projects} user=${user} roleOf=${roleOf} api=${api} onOpen=${open} />`
         : html`<${Board} key=${boardKind} kind=${boardKind} projects=${projects.filter((p) => kindOf(p) === boardKind)} data=${data} roleOf=${roleOf} onOpen=${open}
-            showTasks=${showTasks} onTaskDone=${completeTask}
+            showTasks=${showTasks} onTaskDone=${completeTask} sortBy=${sortBy}
             onMove=${(id, stage, position) => api.update('projects', id, { stage, position })} />`}
       ${view !== 'tasks' && !hasAny && html`
         <div class="blank">
@@ -345,13 +356,35 @@ function Login({ store }) {
 
 // ── Board ──────────────────────────────────────────────────────────────────
 
-function Board({ kind, projects, data, roleOf, onOpen, onMove, showTasks, onTaskDone }) {
+// The date a card is "due": its soonest open task, or a grant's submission
+// deadline while it's still being prepared, whichever comes first.
+function nextDue(p, tasks) {
+  let best = kindOf(p) === 'grant' && PRE_SUBMISSION.has(p.stage) ? p.target_date || null : null;
+  for (const t of tasks) {
+    if (t.project_id === p.id && !t.done && t.due_date && (!best || t.due_date < best)) best = t.due_date;
+  }
+  return best;
+}
+
+const byTitle = (a, b) => (a.title || '').localeCompare(b.title || '', undefined, { sensitivity: 'base' });
+
+function sortCards(items, sortBy, tasks) {
+  if (sortBy === 'az') return [...items].sort(byTitle);
+  if (sortBy === 'due') {
+    const due = new Map(items.map((p) => [p.id, nextDue(p, tasks)]));
+    return [...items].sort((a, b) => (due.get(a.id) || '9999').localeCompare(due.get(b.id) || '9999') || byTitle(a, b));
+  }
+  return [...items].sort(byPos);
+}
+
+function Board({ kind, projects, data, roleOf, onOpen, onMove, showTasks, onTaskDone, sortBy }) {
   const STAGES = KINDS[kind].stages;
   const [dragId, setDragId] = useState(null);
   const [over, setOver] = useState(null);
 
   const drop = (stage, beforeId) => {
     if (!dragId) return;
+    if (sortBy !== 'manual') beforeId = null; // sorted view: a drop only changes the column
     const items = projects.filter((p) => p.stage === stage && p.id !== dragId).sort(byPos);
     const idx = beforeId ? items.findIndex((p) => p.id === beforeId) : -1;
     let position;
@@ -371,7 +404,7 @@ function Board({ kind, projects, data, roleOf, onOpen, onMove, showTasks, onTask
   </nav>
   <div class="board" style=${{ '--per-row-2': Math.ceil(STAGES.length / 2), '--per-row-3': Math.ceil(STAGES.length / 3) }}>
     ${STAGES.map((s) => {
-      const items = projects.filter((p) => p.stage === s.id).sort(byPos);
+      const items = sortCards(projects.filter((p) => p.stage === s.id), sortBy, data.tasks);
       return html`<section id=${`col-${s.id}`} class="col ${over === s.id ? 'over' : ''}" style=${{ '--stage': s.color || 'var(--accent)' }}
         onDragOver=${(e) => { if (dragId) { e.preventDefault(); if (over !== s.id) setOver(s.id); } }}
         onDrop=${(e) => { e.preventDefault(); drop(s.id, null); }}>
