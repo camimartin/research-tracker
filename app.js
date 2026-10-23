@@ -5,8 +5,15 @@ import { CONFIG } from './config.js';
 import { createStore } from './store.js';
 
 const html = htm.bind(h);
-const STAGES = CONFIG.stages;
 const EMPTY = { projects: [], project_members: [], tasks: [], notes: [], submissions: [] };
+
+// Projects and grants share one table and one set of screens; these settings
+// are what differ between the two boards.
+const KINDS = {
+  project: { stages: CONFIG.stages, decisions: CONFIG.decisions, noun: 'project', plural: 'Projects' },
+  grant: { stages: CONFIG.grantStages, decisions: CONFIG.grantDecisions, noun: 'grant', plural: 'Grants' },
+};
+const kindOf = (p) => (p.kind === 'grant' ? 'grant' : 'project');
 
 // ── Small helpers ──────────────────────────────────────────────────────────
 
@@ -39,6 +46,30 @@ function initials(who) {
 
 const shortName = (who) => (who || '').split('@')[0];
 
+function fmtMoney(n, compact = false) {
+  if (n == null || n === '') return '';
+  return new Intl.NumberFormat(undefined, {
+    style: 'currency', currency: CONFIG.currency || 'USD', maximumFractionDigits: compact ? 1 : 0,
+    notation: compact ? 'compact' : 'standard',
+  }).format(n);
+}
+
+// Accepts "$2,450,000", "250k", "1.5M".
+function parseMoney(v) {
+  const m = v.replace(/[,\s$€£]/g, '').match(/^(\d*\.?\d+)([kKmM])?$/);
+  if (!m) return null;
+  return Math.round(parseFloat(m[1]) * ({ k: 1e3, m: 1e6 }[m[2]?.toLowerCase()] || 1));
+}
+
+const daysUntil = (d) => Math.round((new Date(d + 'T00:00') - new Date(today() + 'T00:00')) / 864e5);
+
+function readPref(key, fallback) {
+  try { return localStorage.getItem(key) || fallback; } catch { return fallback; }
+}
+function writePref(key, value) {
+  try { localStorage.setItem(key, value); } catch {}
+}
+
 function parseHash() {
   const m = location.hash.match(/p=([\w-]+)/);
   return m ? m[1] : null;
@@ -50,10 +81,14 @@ function parseHash() {
 function Text({ value, onSave, multiline, ...rest }) {
   const [draft, setDraft] = useState(value ?? '');
   const focused = useRef(false);
-  useEffect(() => { if (!focused.current) setDraft(value ?? ''); }, [value]);
+  const saved = useRef(null); // last draft sent, so Enter + blur don't save twice
+  useEffect(() => { saved.current = null; if (!focused.current) setDraft(value ?? ''); }, [value]);
   const commit = () => {
     focused.current = false;
-    if (draft !== (value ?? '')) onSave(draft);
+    if (draft !== (value ?? '') && draft !== saved.current) {
+      saved.current = draft;
+      onSave(draft);
+    }
   };
   const Tag = multiline ? 'textarea' : 'input';
   return html`<${Tag}
@@ -63,7 +98,7 @@ function Text({ value, onSave, multiline, ...rest }) {
     onInput=${(e) => setDraft(e.target.value)}
     onBlur=${commit}
     onKeyDown=${(e) => {
-      if (!multiline && e.key === 'Enter') e.target.blur();
+      if (!multiline && e.key === 'Enter') { commit(); e.target.blur(); }
       if (e.key === 'Escape') { setDraft(value ?? ''); focused.current = false; e.stopPropagation(); }
     }}
   />`;
@@ -100,7 +135,11 @@ const Avatar = ({ who }) => html`<span class="av" title=${who}>${initials(who)}<
 function App({ store }) {
   const [user, setUser] = useState(undefined); // undefined = loading, null = signed out
   const [data, setData] = useState(EMPTY);
-  const [view, setView] = useState('board');
+  const [view, setViewState] = useState(() => {
+    const v = readPref('research-tracker-view', 'project');
+    return ['project', 'grant', 'tasks'].includes(v) ? v : 'project';
+  });
+  const setView = (v) => { setViewState(v); writePref('research-tracker-view', v); };
   const [openId, setOpenId] = useState(parseHash);
   const [query, setQuery] = useState('');
   const [person, setPerson] = useState('');
@@ -166,16 +205,18 @@ function App({ store }) {
     remove: (table, id) => run(() => store.remove(table, id)),
   }), []);
 
-  const createProject = async () => {
+  const createItem = async (kind) => {
     try {
-      const first = data.projects.filter((p) => p.stage === STAGES[0].id);
+      const stage = KINDS[kind].stages[0].id;
+      const first = data.projects.filter((p) => kindOf(p) === kind && p.stage === stage);
       const row = await store.insert('projects', {
-        title: 'Untitled project',
-        stage: STAGES[0].id,
+        kind,
+        title: `Untitled ${KINDS[kind].noun}`,
+        stage,
         position: Math.min(0, ...first.map((p) => p.position)) - 1,
       });
       await refresh();
-      setView('board');
+      setView(kind);
       open(row.id);
     } catch (e) { notify(e.message); }
   };
@@ -194,19 +235,21 @@ function App({ store }) {
   const projects = data.projects.filter((p) =>
     (showArchived || !p.archived) &&
     (!person || data.project_members.some((m) => m.project_id === p.id && m.email === person)) &&
-    (!q || [p.title, p.summary, p.lead, p.target_journal, ...(p.tags || [])].join(' ').toLowerCase().includes(q)));
+    (!q || [p.title, p.summary, p.lead, p.target_journal, p.funder, p.mechanism, ...(p.tags || [])].join(' ').toLowerCase().includes(q)));
   const current = openId && data.projects.find((p) => p.id === openId);
+  const boardKind = view === 'grant' ? 'grant' : 'project';
+  const hasAny = data.projects.some((p) => kindOf(p) === boardKind);
+  const tab = (v, label) => html`<button role="tab" aria-selected=${view === v} class=${view === v ? 'on' : ''} onClick=${() => setView(v)}>${label}</button>`;
 
   return html`
     ${store.demo && html`<${DemoBar} store=${store} user=${user} />`}
     <header class="top">
       <div class="brand"><img src="icon.svg" alt="" width="26" height="26" /><span>${CONFIG.programName}</span></div>
       <nav class="tabs" role="tablist">
-        <button role="tab" aria-selected=${view === 'board'} class=${view === 'board' ? 'on' : ''} onClick=${() => setView('board')}>Board</button>
-        <button role="tab" aria-selected=${view === 'tasks'} class=${view === 'tasks' ? 'on' : ''} onClick=${() => setView('tasks')}>Tasks</button>
+        ${tab('project', 'Projects')}${tab('grant', 'Grants')}${tab('tasks', 'Tasks')}
       </nav>
       <div class="filters">
-        <input class="search" type="search" placeholder="Search projects…" value=${query} onInput=${(e) => setQuery(e.target.value)} />
+        <input class="search" type="search" placeholder="Search…" value=${query} onInput=${(e) => setQuery(e.target.value)} />
         ${user.isAdmin && people.length > 0 && html`
           <select class="person" value=${person} onChange=${(e) => setPerson(e.target.value)} aria-label="Filter by collaborator">
             <option value="">All collaborators</option>
@@ -215,7 +258,7 @@ function App({ store }) {
         <label class="check"><input type="checkbox" checked=${showArchived} onChange=${(e) => setShowArchived(e.target.checked)} /> Archived</label>
       </div>
       <div class="actions">
-        ${user.isAdmin && html`<button class="primary" onClick=${createProject}>+ New project</button>`}
+        ${user.isAdmin && view !== 'tasks' && html`<button class="primary" onClick=${() => createItem(boardKind)}>+ New ${KINDS[boardKind].noun}</button>`}
         ${!store.demo && html`
           <span class="me" title=${user.email}><${Avatar} who=${user.email} /></span>
           <button class="ghost" onClick=${() => store.signOut()}>Sign out</button>`}
@@ -223,15 +266,15 @@ function App({ store }) {
     </header>
 
     <main>
-      ${view === 'board'
-        ? html`<${Board} projects=${projects} data=${data} roleOf=${roleOf} onOpen=${open}
-            onMove=${(id, stage, position) => api.update('projects', id, { stage, position })} />`
-        : html`<${TaskList} data=${data} projects=${projects} user=${user} roleOf=${roleOf} api=${api} onOpen=${open} />`}
-      ${!data.projects.length && html`
+      ${view === 'tasks'
+        ? html`<${TaskList} data=${data} projects=${projects} user=${user} roleOf=${roleOf} api=${api} onOpen=${open} />`
+        : html`<${Board} key=${boardKind} kind=${boardKind} projects=${projects.filter((p) => kindOf(p) === boardKind)} data=${data} roleOf=${roleOf} onOpen=${open}
+            onMove=${(id, stage, position) => api.update('projects', id, { stage, position })} />`}
+      ${view !== 'tasks' && !hasAny && html`
         <div class="blank">
           ${user.isAdmin
-            ? html`<p>No projects yet.</p><button class="primary" onClick=${createProject}>Create your first project</button>`
-            : html`<p>No projects have been shared with <strong>${user.email}</strong> yet.</p><p class="muted">Ask the project owner to add this email address.</p>`}
+            ? html`<p>No ${KINDS[boardKind].noun}s yet.</p><button class="primary" onClick=${() => createItem(boardKind)}>Create your first ${KINDS[boardKind].noun}</button>`
+            : html`<p>No ${KINDS[boardKind].noun}s have been shared with <strong>${user.email}</strong> yet.</p><p class="muted">Ask the owner to add this email address.</p>`}
         </div>`}
     </main>
 
@@ -289,7 +332,8 @@ function Login({ store }) {
 
 // ── Board ──────────────────────────────────────────────────────────────────
 
-function Board({ projects, data, roleOf, onOpen, onMove }) {
+function Board({ kind, projects, data, roleOf, onOpen, onMove }) {
+  const STAGES = KINDS[kind].stages;
   const [dragId, setDragId] = useState(null);
   const [over, setOver] = useState(null);
 
@@ -312,7 +356,7 @@ function Board({ projects, data, roleOf, onOpen, onMove }) {
       <span class="dot"></span>${s.label} <span class="count">${projects.filter((p) => p.stage === s.id).length}</span>
     </button>`)}
   </nav>
-  <div class="board">
+  <div class="board" style=${{ '--per-row-2': Math.ceil(STAGES.length / 2), '--per-row-3': Math.ceil(STAGES.length / 3) }}>
     ${STAGES.map((s) => {
       const items = projects.filter((p) => p.stage === s.id).sort(byPos);
       return html`<section id=${`col-${s.id}`} class="col ${over === s.id ? 'over' : ''}" style=${{ '--stage': s.color || 'var(--accent)' }}
@@ -342,8 +386,9 @@ function Card({ p, data, role, onOpen, dragging, onDragStart, onDragEnd, onDrop 
   return html`<article class="card ${p.archived ? 'archived' : ''} ${dragging ? 'dragging' : ''}" tabindex="0"
     draggable=${canDrag} onDragStart=${onDragStart} onDragEnd=${onDragEnd} onDrop=${onDrop}
     onClick=${() => onOpen(p.id)} onKeyDown=${(e) => e.key === 'Enter' && onOpen(p.id)}>
-    <h3>${p.title || 'Untitled project'}</h3>
-    ${(p.lead || p.target_journal) && html`<p class="meta">${[p.lead, p.target_journal].filter(Boolean).join(' · ')}</p>`}
+    <h3>${p.title || 'Untitled'}</h3>
+    ${kindOf(p) === 'grant' ? html`<${GrantMeta} p=${p} />`
+      : (p.lead || p.target_journal) && html`<p class="meta">${[p.lead, p.target_journal].filter(Boolean).join(' · ')}</p>`}
     ${p.tags?.length > 0 && html`<div class="tags">${p.tags.map((t) => html`<span class="tag">${t}</span>`)}</div>`}
     ${tasks.length > 0 && html`<div class="progress" title="${done} of ${tasks.length} tasks done"><div style=${{ width: `${(100 * done) / tasks.length}%` }}></div></div>`}
     <footer>
@@ -355,6 +400,23 @@ function Card({ p, data, role, onOpen, dragging, onDragStart, onDragEnd, onDrop 
       <span class="avatars">${members.slice(0, 4).map((m) => html`<${Avatar} who=${m.email} />`)}${members.length > 4 && html`<span class="av more">+${members.length - 4}</span>`}</span>
     </footer>
   </article>`;
+}
+
+// Deadlines only matter until the grant goes out the door.
+const PRE_SUBMISSION = new Set(['idea', 'planning', 'writing', 'routing', 'resubmit']);
+
+function GrantMeta({ p }) {
+  const who = [p.role, p.funder, p.mechanism].filter(Boolean).join(' · ');
+  const showDeadline = p.target_date && PRE_SUBMISSION.has(p.stage);
+  const days = showDeadline ? daysUntil(p.target_date) : null;
+  const when = days == null ? '' : days < 0 ? `${-days} d overdue` : days === 0 ? 'today' : `in ${days} d`;
+  return html`
+    ${who && html`<p class="meta">${who}</p>`}
+    ${(p.amount != null || showDeadline || p.end_date) && html`<p class="grant-line">
+      ${p.amount != null && html`<span class="amount">${fmtMoney(p.amount, true)}</span>`}
+      ${showDeadline && html`<span class="deadline ${days < 0 ? 'late' : days <= 14 ? 'soon' : ''}">Deadline ${fmtDate(p.target_date)} (${when})</span>`}
+      ${!showDeadline && p.end_date && html`<span class="muted">Ends ${fmtDate(p.end_date)}</span>`}
+    </p>`}`;
 }
 
 // ── Tasks view (across projects) ───────────────────────────────────────────
@@ -386,7 +448,7 @@ function TaskList({ data, projects, user, roleOf, api, onOpen }) {
           <input type="checkbox" checked=${t.done} disabled=${!canEdit} aria-label="Done" onChange=${(e) => api.update('tasks', t.id, { done: e.target.checked })} />
           <div class="grow">
             <div class="task-name">${parent && html`<span class="muted">${parent.title} › </span>`}${t.title}</div>
-            <button class="link" onClick=${() => onOpen(p.id)}>${p.title}</button>
+            <button class="link" onClick=${() => onOpen(p.id)}>${kindOf(p) === 'grant' && html`<span class="kind">Grant</span>`}${p.title}</button>
           </div>
           ${t.assignee && scope === 'all' && html`<span class="who"><${Avatar} who=${t.assignee} /> ${shortName(t.assignee)}</span>`}
           <span class="due ${!t.done && isOverdue(t.due_date) ? 'late' : ''}">${fmtDate(t.due_date)}</span>
@@ -404,6 +466,9 @@ function ProjectDetail({ p, data, role, user, api, onClose, onDelete }) {
   const save = (patch) => api.update('projects', p.id, patch);
   const members = data.project_members.filter((m) => m.project_id === p.id);
   const listId = `people-${p.id}`;
+  const kind = kindOf(p);
+  const { stages, noun } = KINDS[kind];
+  const stageKnown = stages.some((s) => s.id === p.stage);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -417,13 +482,15 @@ function ProjectDetail({ p, data, role, user, api, onClose, onDelete }) {
     <div class="scrim" onClick=${onClose}></div>
     <aside class="drawer" role="dialog" aria-modal="true" aria-label=${p.title}>
       <div class="drawer-head">
-        <${Text} class="title-input" value=${p.title} disabled=${!canEdit} placeholder="Project title" aria-label="Project title"
-          onSave=${(v) => save({ title: v.trim() || 'Untitled project' })} />
+        <${Text} class="title-input" value=${p.title} disabled=${!canEdit} placeholder="Title" aria-label="Title"
+          onSave=${(v) => save({ title: v.trim() || `Untitled ${noun}` })} />
         <button class="icon close" onClick=${onClose} aria-label="Close">✕</button>
       </div>
       <div class="drawer-sub">
+        ${kind === 'grant' && html`<span class="kind">Grant</span>`}
         <select class="stage-select" value=${p.stage} disabled=${!canEdit} onChange=${(e) => save({ stage: e.target.value })} aria-label="Stage">
-          ${STAGES.map((s) => html`<option value=${s.id}>${s.label}</option>`)}
+          ${!stageKnown && html`<option value=${p.stage}>${p.stage}</option>`}
+          ${stages.map((s) => html`<option value=${s.id}>${s.label}</option>`)}
         </select>
         ${role === 'viewer' && html`<span class="badge">View only</span>`}
         ${p.archived && html`<span class="badge">Archived</span>`}
@@ -434,30 +501,58 @@ function ProjectDetail({ p, data, role, user, api, onClose, onDelete }) {
 
       <div class="drawer-body">
         <${Section} title="Overview">
-          <label class="field"><span>Summary / aims</span>
+          <label class="field"><span>${kind === 'grant' ? 'Summary / specific aims' : 'Summary / aims'}</span>
             <${Text} multiline rows="3" value=${p.summary} disabled=${!canEdit} placeholder="Research question, hypothesis, design…" onSave=${(v) => save({ summary: v })} />
           </label>
-          <div class="grid2">
-            <label class="field"><span>Lead</span><${Text} value=${p.lead} disabled=${!canEdit} placeholder="Who's leading" onSave=${(v) => save({ lead: v.trim() })} /></label>
-            <label class="field"><span>Target journal</span><${Text} value=${p.target_journal} disabled=${!canEdit} placeholder="—" onSave=${(v) => save({ target_journal: v.trim() })} /></label>
-            <label class="field"><span>Target date</span><${DateInput} value=${p.target_date} disabled=${!canEdit} onSave=${(v) => save({ target_date: v })} /></label>
-            <label class="field"><span>Tags</span><${Text} value=${(p.tags || []).join(', ')} disabled=${!canEdit} placeholder="comma, separated"
-              onSave=${(v) => save({ tags: v.split(',').map((s) => s.trim()).filter(Boolean) })} /></label>
-          </div>
+          ${kind === 'grant'
+            ? html`<${GrantFields} p=${p} canEdit=${canEdit} save=${save} />`
+            : html`<div class="grid2">
+              <label class="field"><span>Lead</span><${Text} value=${p.lead} disabled=${!canEdit} placeholder="Who's leading" onSave=${(v) => save({ lead: v.trim() })} /></label>
+              <label class="field"><span>Target journal</span><${Text} value=${p.target_journal} disabled=${!canEdit} placeholder="—" onSave=${(v) => save({ target_journal: v.trim() })} /></label>
+              <label class="field"><span>Target date</span><${DateInput} value=${p.target_date} disabled=${!canEdit} onSave=${(v) => save({ target_date: v })} /></label>
+              <label class="field"><span>Tags</span><${TagsInput} p=${p} canEdit=${canEdit} save=${save} /></label>
+            </div>`}
         </${Section}>
 
         <${Tasks} p=${p} data=${data} canEdit=${canEdit} api=${api} listId=${listId} />
         <${Notes} p=${p} data=${data} canEdit=${canEdit} user=${user} api=${api} />
-        <${Submissions} p=${p} data=${data} canEdit=${canEdit} api=${api} />
+        <${Submissions} p=${p} kind=${kind} data=${data} canEdit=${canEdit} api=${api} />
         <${Links} p=${p} canEdit=${canEdit} save=${save} />
         <${People} p=${p} members=${members} isAdmin=${isAdmin} api=${api} />
 
         ${isAdmin && html`<div class="danger-zone">
-          <button class="ghost" onClick=${() => save({ archived: !p.archived })}>${p.archived ? 'Restore from archive' : 'Archive project'}</button>
-          <button class="ghost danger" onClick=${onDelete}>Delete project</button>
+          <button class="ghost" onClick=${() => save({ archived: !p.archived })}>${p.archived ? 'Restore from archive' : `Archive ${noun}`}</button>
+          <button class="ghost danger" onClick=${onDelete}>Delete ${noun}</button>
         </div>`}
       </div>
     </aside>`;
+}
+
+const TagsInput = ({ p, canEdit, save }) => html`<${Text} value=${(p.tags || []).join(', ')} disabled=${!canEdit} placeholder="comma, separated"
+  onSave=${(v) => save({ tags: v.split(',').map((s) => s.trim()).filter(Boolean) })} />`;
+
+function GrantFields({ p, canEdit, save }) {
+  const roles = CONFIG.grantRoles || [];
+  return html`<div class="grid2">
+    <label class="field"><span>Funder</span><${Text} value=${p.funder} disabled=${!canEdit} placeholder="e.g. NIH / NICHD" onSave=${(v) => save({ funder: v.trim() })} /></label>
+    <label class="field"><span>Mechanism / announcement</span><${Text} value=${p.mechanism} disabled=${!canEdit} placeholder="e.g. R01, PA-25-301" onSave=${(v) => save({ mechanism: v.trim() })} /></label>
+    <label class="field"><span>PI</span><${Text} value=${p.lead} disabled=${!canEdit} placeholder="Principal investigator" onSave=${(v) => save({ lead: v.trim() })} /></label>
+    <label class="field"><span>My role</span>
+      <select value=${p.role} disabled=${!canEdit} onChange=${(e) => save({ role: e.target.value })}>
+        <option value="">—</option>
+        ${p.role && !roles.includes(p.role) && html`<option value=${p.role}>${p.role}</option>`}
+        ${roles.map((r) => html`<option value=${r}>${r}</option>`)}
+      </select>
+    </label>
+    <label class="field"><span>Submission deadline</span><${DateInput} value=${p.target_date} disabled=${!canEdit} onSave=${(v) => save({ target_date: v })} /></label>
+    <label class="field"><span>Total amount</span>
+      <${Text} value=${p.amount == null ? '' : fmtMoney(p.amount)} disabled=${!canEdit} placeholder="$0" inputmode="decimal"
+        onSave=${(v) => save({ amount: parseMoney(v) })} />
+    </label>
+    <label class="field"><span>Project start</span><${DateInput} value=${p.start_date} disabled=${!canEdit} onSave=${(v) => save({ start_date: v })} /></label>
+    <label class="field"><span>Project end</span><${DateInput} value=${p.end_date} disabled=${!canEdit} onSave=${(v) => save({ end_date: v })} /></label>
+    <label class="field"><span>Tags</span><${TagsInput} p=${p} canEdit=${canEdit} save=${save} /></label>
+  </div>`;
 }
 
 function Tasks({ p, data, canEdit, api, listId }) {
@@ -535,23 +630,31 @@ function Notes({ p, data, canEdit, user, api }) {
   </${Section}>`;
 }
 
-function Submissions({ p, data, canEdit, api }) {
+function Submissions({ p, kind, data, canEdit, api }) {
+  const grant = kind === 'grant';
+  const decisions = KINDS[kind].decisions;
   const subs = data.submissions.filter((s) => s.project_id === p.id).sort((a, b) => (a.submitted_on || '').localeCompare(b.submitted_on || ''));
-  const add = () => api.insert('submissions', { project_id: p.id, journal: p.target_journal || '', submitted_on: today() });
+  const add = () => api.insert('submissions', {
+    project_id: p.id,
+    journal: grant ? [p.funder, p.mechanism].filter(Boolean).join(' – ') : p.target_journal || '',
+    decision: decisions[0],
+    submitted_on: today(),
+  });
   return html`<${Section} title="Submission history" aside=${subs.length ? String(subs.length) : ''}>
     ${subs.length > 0 && html`<div class="subs">
       ${subs.map((s) => {
         const up = (patch) => api.update('submissions', s.id, patch);
         return html`<div class="sub" key=${s.id}>
-          <${Text} class="sub-journal" value=${s.journal} disabled=${!canEdit} placeholder="Journal" aria-label="Journal" onSave=${(v) => up({ journal: v.trim() })} />
+          <${Text} class="sub-journal" value=${s.journal} disabled=${!canEdit} placeholder=${grant ? 'Funder / mechanism' : 'Journal'} aria-label=${grant ? 'Funder' : 'Journal'} onSave=${(v) => up({ journal: v.trim() })} />
           <label class="mini"><span>Submitted</span><${DateInput} value=${s.submitted_on} disabled=${!canEdit} onSave=${(v) => up({ submitted_on: v })} /></label>
           <label class="mini"><span>Decision</span>
             <select value=${s.decision} disabled=${!canEdit} class="decision d-${s.decision.split(' ')[0].toLowerCase()}" onChange=${(e) => up({ decision: e.target.value })}>
-              ${CONFIG.decisions.map((d) => html`<option value=${d}>${d}</option>`)}
+              ${!decisions.includes(s.decision) && html`<option value=${s.decision}>${s.decision}</option>`}
+              ${decisions.map((d) => html`<option value=${d}>${d}</option>`)}
             </select>
           </label>
           <label class="mini"><span>Decision date</span><${DateInput} value=${s.decision_on} disabled=${!canEdit} onSave=${(v) => up({ decision_on: v })} /></label>
-          <${Text} class="sub-comments" value=${s.comments} disabled=${!canEdit} placeholder="Comments (reviewers, deadlines…)" aria-label="Comments" onSave=${(v) => up({ comments: v })} />
+          <${Text} class="sub-comments" value=${s.comments} disabled=${!canEdit} placeholder=${grant ? 'Score, percentile, summary statement notes…' : 'Comments (reviewers, deadlines…)'} aria-label="Comments" onSave=${(v) => up({ comments: v })} />
           ${canEdit && html`<button class="icon" aria-label="Delete submission" onClick=${() => confirm('Delete this submission record?') && api.remove('submissions', s.id)}>✕</button>`}
         </div>`;
       })}

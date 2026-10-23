@@ -11,8 +11,10 @@ import { demoSeed } from './demo-data.js';
 
 export const TABLES = ['projects', 'project_members', 'tasks', 'notes', 'submissions'];
 
+// Add ?demo to the address to try the sample data even when Supabase is configured.
 export function createStore() {
-  return CONFIG.supabaseUrl && CONFIG.supabaseAnonKey ? new SupabaseStore() : new DemoStore();
+  const forceDemo = new URLSearchParams(location.search).has('demo');
+  return CONFIG.supabaseUrl && CONFIG.supabaseAnonKey && !forceDemo ? new SupabaseStore() : new DemoStore();
 }
 
 // ── Live store (Supabase) ──────────────────────────────────────────────────
@@ -93,13 +95,14 @@ class SupabaseStore {
 // Mirrors the database permission rules so the demo behaves like the real thing.
 // Open the page in two tabs to see changes sync live between them.
 
-const DATA_KEY = 'research-tracker-demo-data';
+const DATA_KEY = 'research-tracker-demo-data-v2';
 const USER_KEY = 'research-tracker-demo-user';
 
 const DEFAULTS = {
   projects: {
-    title: 'Untitled project', summary: '', stage: CONFIG.stages[0].id, position: 0, lead: '',
+    kind: 'project', title: 'Untitled project', summary: '', stage: CONFIG.stages[0].id, position: 0, lead: '',
     target_journal: '', target_date: null, tags: [], links: [], archived: false,
+    funder: '', mechanism: '', amount: null, role: '', start_date: null, end_date: null,
   },
   project_members: { role: 'editor' },
   tasks: { parent_id: null, title: '', done: false, assignee: '', due_date: null, position: 0 },

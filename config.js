@@ -35,4 +35,30 @@ export const CONFIG = {
     'Desk rejected',
     'Withdrawn',
   ],
+
+  // Grants board columns, left to right.
+  grantStages: [
+    { id: 'idea', label: 'Opportunity', color: '#8b5cf6' },
+    { id: 'planning', label: 'Planning', color: '#6366f1' },
+    { id: 'writing', label: 'Writing', color: '#0ea5e9' },
+    { id: 'routing', label: 'Internal routing', color: '#14b8a6' },
+    { id: 'review', label: 'Under review', color: '#eab308' },
+    { id: 'resubmit', label: 'Resubmission', color: '#f97316' },
+    { id: 'awarded', label: 'Awarded', color: '#22c55e' },
+    { id: 'active', label: 'Active', color: '#0d9488' },
+    { id: 'closed', label: 'Closed', color: '#64748b' },
+  ],
+
+  grantDecisions: [
+    'Pending review',
+    'Not discussed',
+    'Scored',
+    'Funded',
+    'Not funded',
+    'Withdrawn',
+  ],
+
+  grantRoles: ['PI', 'MPI', 'Co-I', 'Mentor', 'Consultant', 'Other'],
+
+  currency: 'USD',
 };
