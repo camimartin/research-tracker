@@ -342,7 +342,7 @@ const SIGNIN_EMAIL_KEY = 'research-tracker-signin-email';
 
 const LINK_ERROR_TEXT =
   'That sign-in link had already been used or had expired. This often happens when a university or ' +
-  'hospital email system checks links before you see them. Enter the 6-digit code from the same email instead.';
+  'hospital email system checks links before you see them. Enter the code from the same email instead.';
 
 function Login({ store }) {
   // If a used/expired link brought them back, go straight to the code step for the email they used.
@@ -379,9 +379,11 @@ function Login({ store }) {
       try {
         await store.verifyCode(email, code.replace(/\D/g, ''));
       } catch (err) {
-        throw new Error(/expired|invalid/i.test(err.message || '')
-          ? 'That code didn’t work — it may be mistyped or expired. Check the most recent email, or send a new one.'
-          : err.message || String(err));
+        // Keep Supabase's own wording at the end so a failure can be diagnosed.
+        const reason = err.message || String(err);
+        throw new Error(/expired|invalid/i.test(reason)
+          ? `That code didn’t work. Make sure it’s from the newest email — asking for a new code cancels earlier ones — and that it was sent within the last hour. (${reason})`
+          : reason);
       }
     });
   };
@@ -401,8 +403,9 @@ function Login({ store }) {
           <h1>${CONFIG.programName}</h1>
           ${error === LINK_ERROR_TEXT
             ? html`<p class="error">${error}</p>`
-            : html`<p>We emailed a sign-in code to <strong>${email}</strong>. Enter it below, or click the link in that email.</p>`}
-          <input class="code-input" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" maxlength="10"
+            : html`<p>We emailed a sign-in code to <strong>${email}</strong>. Enter it below, or click the link in that email.
+                It can take a minute or two to arrive; if you ask for another, use the newest one.</p>`}
+          <input class="code-input" inputmode="numeric" autocomplete="one-time-code" placeholder="Code from email" maxlength="12"
             value=${code} onInput=${(e) => setCode(e.target.value)} aria-label="Sign-in code" />
           <button class="primary" disabled=${busy || code.replace(/\D/g, '').length < 6}>${busy ? 'Checking…' : 'Sign in'}</button>
           ${error && error !== LINK_ERROR_TEXT && html`<p class="error">${error}</p>`}
