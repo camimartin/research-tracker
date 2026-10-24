@@ -1,7 +1,7 @@
 // Data layer. Both stores expose the same interface so the UI doesn't care
 // which one it talks to:
 //   getUser() → { email, isAdmin } | null      onAuth(cb) → unsubscribe
-//   signIn(email)  signOut()
+//   signIn(email)  verifyCode(email, code)  signOut()
 //   loadAll() → { projects, project_members, tasks, notes, submissions, owners }
 //   insert(table, row) → row   update(table, id, patch)   remove(table, id)
 //   subscribe(cb) → unsubscribe   (cb fires whenever anyone changes data)
@@ -23,6 +23,14 @@ class SupabaseStore {
   demo = false;
 
   async init() {
+    // A sign-in link that was already used or expired comes back with the reason
+    // in the address (#error_description=…). Keep it to show on the sign-in page,
+    // then tidy the address.
+    const params = new URLSearchParams(location.hash.slice(1));
+    if (params.get('error_description') || params.get('error')) {
+      this.linkError = params.get('error_code') || params.get('error') || 'link_error';
+      history.replaceState(null, '', location.pathname + location.search);
+    }
     const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2.45.4');
     this.sb = createClient(CONFIG.supabaseUrl, CONFIG.supabaseAnonKey);
   }
@@ -46,6 +54,13 @@ class SupabaseStore {
       email,
       options: { emailRedirectTo: location.origin + location.pathname },
     });
+    if (error) throw error;
+  }
+
+  // The 6-digit code from the sign-in email. Works even when an email security
+  // scanner has already "clicked" (and so used up) the one-time link.
+  async verifyCode(email, code) {
+    const { error } = await this.sb.auth.verifyOtp({ email, token: code, type: 'email' });
     if (error) throw error;
   }
 
@@ -165,6 +180,7 @@ class DemoStore {
   switchUser(email) { this.email = email; safeSet(USER_KEY, email); this.authListeners.forEach((f) => f()); }
   reset() { this.mem = clone(demoSeed.data); this.save(); }
   async signIn() {}
+  async verifyCode() {}
   async signOut() {}
   subscribe(cb) { this.listeners.add(cb); return () => this.listeners.delete(cb); }
 

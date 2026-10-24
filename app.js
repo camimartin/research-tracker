@@ -338,34 +338,77 @@ function DemoBar({ store, user }) {
 
 // ── Sign in ────────────────────────────────────────────────────────────────
 
+const SIGNIN_EMAIL_KEY = 'research-tracker-signin-email';
+
+const LINK_ERROR_TEXT =
+  'That sign-in link had already been used or had expired. This often happens when a university or ' +
+  'hospital email system checks links before you see them. Enter the 6-digit code from the same email instead.';
+
 function Login({ store }) {
-  const [email, setEmail] = useState('');
-  const [state, setState] = useState('idle');
-  const [error, setError] = useState('');
-  const submit = async (e) => {
-    e.preventDefault();
+  // If a used/expired link brought them back, go straight to the code step for the email they used.
+  const remembered = readPref(SIGNIN_EMAIL_KEY, '');
+  const [email, setEmail] = useState(remembered);
+  const [code, setCode] = useState('');
+  const [step, setStep] = useState(store.linkError && remembered ? 'code' : 'email'); // email | code
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(store.linkError ? LINK_ERROR_TEXT : '');
+
+  const run = async (fn) => {
     setError('');
-    setState('sending');
-    try {
-      await store.signIn(email.trim().toLowerCase());
-      setState('sent');
-    } catch (err) {
-      setError(err.message || String(err));
-      setState('idle');
-    }
+    setBusy(true);
+    try { await fn(); } catch (err) { setError(err.message || String(err)); }
+    setBusy(false);
   };
+
+  const sendEmail = (e) => {
+    e.preventDefault();
+    run(async () => {
+      const em = email.trim().toLowerCase();
+      await store.signIn(em);
+      writePref(SIGNIN_EMAIL_KEY, em);
+      setEmail(em);
+      setCode('');
+      setStep('code');
+    });
+  };
+
+  // On success the app notices the new session and swaps this page for the board.
+  const verify = (e) => {
+    e.preventDefault();
+    run(async () => {
+      try {
+        await store.verifyCode(email, code.replace(/\D/g, ''));
+      } catch (err) {
+        throw new Error(/expired|invalid/i.test(err.message || '')
+          ? 'That code didn’t work — it may be mistyped or expired. Check the most recent email, or send a new one.'
+          : err.message || String(err));
+      }
+    });
+  };
+
   return html`<div class="login">
-    <form class="login-card" onSubmit=${submit}>
-      <img src="icon.svg" alt="" width="44" height="44" />
-      <h1>${CONFIG.programName}</h1>
-      ${state === 'sent'
-        ? html`<p>Check <strong>${email}</strong> for a sign-in link. You can close this tab once you've clicked it.</p>
-               <button type="button" class="ghost" onClick=${() => setState('idle')}>Use a different email</button>`
-        : html`<p class="muted">Sign in with the email your projects were shared with. We'll email you a link — no password needed.</p>
-               <input type="email" required autocomplete="email" placeholder="you@university.edu" value=${email} onInput=${(e) => setEmail(e.target.value)} />
-               <button class="primary" disabled=${state === 'sending'}>${state === 'sending' ? 'Sending…' : 'Email me a sign-in link'}</button>
-               ${error && html`<p class="error">${error}</p>`}`}
-    </form>
+    ${step === 'email'
+      ? html`<form class="login-card" onSubmit=${sendEmail}>
+          <img src="icon.svg" alt="" width="44" height="44" />
+          <h1>${CONFIG.programName}</h1>
+          <p class="muted">Sign in with the email your projects were shared with. We'll email you a sign-in code — no password needed.</p>
+          <input type="email" required autocomplete="email" placeholder="you@university.edu" value=${email} onInput=${(e) => setEmail(e.target.value)} />
+          <button class="primary" disabled=${busy}>${busy ? 'Sending…' : 'Email me a sign-in code'}</button>
+          ${error && html`<p class="error">${error}</p>`}
+        </form>`
+      : html`<form class="login-card" onSubmit=${verify}>
+          <img src="icon.svg" alt="" width="44" height="44" />
+          <h1>${CONFIG.programName}</h1>
+          ${error === LINK_ERROR_TEXT
+            ? html`<p class="error">${error}</p>`
+            : html`<p>We emailed a sign-in code to <strong>${email}</strong>. Enter it below, or click the link in that email.</p>`}
+          <input class="code-input" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" maxlength="10"
+            value=${code} onInput=${(e) => setCode(e.target.value)} aria-label="Sign-in code" />
+          <button class="primary" disabled=${busy || code.replace(/\D/g, '').length < 6}>${busy ? 'Checking…' : 'Sign in'}</button>
+          ${error && error !== LINK_ERROR_TEXT && html`<p class="error">${error}</p>`}
+          <p class="muted small">Can't find it? Check spam, or${' '}<button type="button" class="link-inline" disabled=${busy} onClick=${() => run(async () => { await store.signIn(email); setCode(''); })}>send a new code</button>
+            · <button type="button" class="link-inline" onClick=${() => { setError(''); setStep('email'); }}>use a different email</button></p>
+        </form>`}
   </div>`;
 }
 
