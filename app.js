@@ -890,6 +890,78 @@ function Submissions({ p, kind, data, canEdit, api }) {
   </${Section}>`;
 }
 
+// ── Recognising document links ─────────────────────────────────────────────
+// Microsoft share links carry the document type in the address:
+//   SharePoint/OneDrive for work: https://<org>.sharepoint.com/:w:/g/…   (w Word, x Excel, p PowerPoint, b PDF, f folder, o OneNote)
+//   Personal OneDrive short links: https://1drv.ms/w/s!…
+// Otherwise fall back to the file extension in the address.
+
+const DOC_TYPES = {
+  word: { badge: 'W', name: 'Word document', label: 'Word' },
+  excel: { badge: 'X', name: 'Excel workbook', label: 'Excel' },
+  powerpoint: { badge: 'P', name: 'PowerPoint deck', label: 'PowerPoint' },
+  pdf: { badge: 'PDF', name: 'PDF', label: 'PDF' },
+  onenote: { badge: 'N', name: 'OneNote notebook', label: 'OneNote' },
+  folder: { badge: '📁', name: 'Folder', label: 'Folder' },
+  doc: { badge: 'D', name: 'Google Doc', label: 'Google Doc' },
+  sheet: { badge: 'S', name: 'Google Sheet', label: 'Google Sheet' },
+  slides: { badge: 'S', name: 'Google Slides', label: 'Google Slides' },
+  link: { badge: '🔗', name: 'Link', label: '' },
+};
+const MS_LETTERS = { w: 'word', x: 'excel', p: 'powerpoint', b: 'pdf', f: 'folder', o: 'onenote' };
+const EXTENSIONS = {
+  docx: 'word', doc: 'word', rtf: 'word', xlsx: 'excel', xls: 'excel', xlsm: 'excel', csv: 'excel',
+  pptx: 'powerpoint', ppt: 'powerpoint', pdf: 'pdf', one: 'onenote',
+};
+
+function describeLink(url) {
+  let u;
+  try { u = new URL(url); } catch { return { type: 'link', source: '', fileName: '' }; }
+  const host = u.hostname.toLowerCase();
+  const path = decodeURIComponent(u.pathname);
+  // A file name may sit at the end of the path or in a ?file= parameter (SharePoint "Doc.aspx" links).
+  const fileName = (u.searchParams.get('file') || path.split('/').pop() || '').trim();
+  const ext = fileName.includes('.') ? fileName.split('.').pop().toLowerCase() : '';
+
+  let source = '';
+  let type = '';
+  if (host.endsWith('sharepoint.com')) {
+    source = /-my\.sharepoint\.com$/.test(host) ? 'OneDrive' : 'SharePoint';
+    type = MS_LETTERS[path.match(/^\/:([a-z]):\//)?.[1]];
+  } else if (host === '1drv.ms' || host.endsWith('onedrive.live.com')) {
+    source = 'OneDrive';
+    type = MS_LETTERS[path.match(/^\/([a-z])\//)?.[1]];
+  } else if (host === 'teams.microsoft.com') {
+    source = 'Teams';
+  } else if (host === 'docs.google.com') {
+    source = 'Google Drive';
+    type = { document: 'doc', spreadsheets: 'sheet', presentation: 'slides' }[path.split('/')[1]];
+  } else if (host === 'drive.google.com') {
+    source = 'Google Drive';
+    if (path.includes('/folders/')) type = 'folder';
+  } else if (host.endsWith('overleaf.com')) source = 'Overleaf';
+  else if (host === 'osf.io' || host.endsWith('.osf.io')) source = 'OSF';
+  else if (host === 'github.com') source = 'GitHub';
+  else if (host.includes('redcap')) source = 'REDCap';
+  else if (host === 'doi.org' || host === 'dx.doi.org') source = 'DOI';
+  else if (host.endsWith('pubmed.ncbi.nlm.nih.gov')) source = 'PubMed';
+
+  type = type || EXTENSIONS[ext] || 'link';
+  return { type, source, fileName: EXTENSIONS[ext] ? fileName : '' };
+}
+
+// The label to show when someone adds a link without typing one.
+function defaultLinkLabel(url) {
+  const { type, source, fileName } = describeLink(url);
+  if (fileName) return fileName;
+  if (type !== 'link') return DOC_TYPES[type].name;
+  return source ? `${source} link` : url.replace(/^https?:\/\//, '').slice(0, 60);
+}
+
+function LinkBadge({ type }) {
+  return html`<span class="doc-badge doc-${type}" aria-hidden="true">${DOC_TYPES[type].badge}</span>`;
+}
+
 function fmtBytes(n) {
   if (n == null) return '';
   if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
@@ -911,7 +983,7 @@ function LinksAndFiles({ p, canEdit, save, api }) {
     if (!u) return;
     if (!/^[a-z]+:\/\//i.test(u)) u = 'https://' + u;
     if (!safeUrl(u)) return;
-    save({ links: [...items, { label: label.trim() || u.replace(/^https?:\/\//, ''), url: u }] });
+    save({ links: [...items, { label: label.trim() || defaultLinkLabel(u), url: u }] });
     setLabel('');
     setUrl('');
   };
@@ -954,23 +1026,39 @@ function LinksAndFiles({ p, canEdit, save, api }) {
   return html`<div class="field links-block">
     <span>Links & files${items.length ? ` (${items.length})` : ''}</span>
     <ul class="links">
-      ${items.map((l, i) => html`<li key=${l.path || l.url || i}>
-        ${l.type === 'file'
-          ? html`<span class="link-icon" aria-hidden="true">📄</span>
+      ${items.map((l, i) => {
+        if (l.type === 'file') {
+          const ext = l.name.includes('.') ? l.name.split('.').pop().toLowerCase() : '';
+          const type = EXTENSIONS[ext] || 'link';
+          return html`<li key=${l.path}>
+            ${type === 'link' ? html`<span class="doc-badge doc-file" aria-hidden="true">📄</span>` : html`<${LinkBadge} type=${type} />`}
+            <span class="link-text">
               <button class="file-link" onClick=${() => openFile(l)}>${l.name}</button>
-              <span class="muted small">${fmtBytes(l.size)}</span>`
-          : html`<span class="link-icon" aria-hidden="true">🔗</span>
-              ${safeUrl(l.url) ? html`<a href=${l.url} target="_blank" rel="noopener noreferrer">${l.label}</a>` : html`<span>${l.label}</span>`}`}
-        ${canEdit && html`<button class="icon" aria-label=${l.type === 'file' ? 'Delete file' : 'Remove link'} onClick=${() => remove(l, i)}>✕</button>`}
-      </li>`)}
+              <span class="link-source">Uploaded file · ${fmtBytes(l.size)}</span>
+            </span>
+            ${canEdit && html`<button class="icon" aria-label="Delete file" onClick=${() => remove(l, i)}>✕</button>`}
+          </li>`;
+        }
+        const { type, source } = describeLink(l.url);
+        const kindLabel = [DOC_TYPES[type].label, source].filter(Boolean).join(' · ');
+        return html`<li key=${l.url || i}>
+          <${LinkBadge} type=${type} />
+          <span class="link-text">
+            ${safeUrl(l.url) ? html`<a href=${l.url} target="_blank" rel="noopener noreferrer">${l.label}</a>` : html`<span>${l.label}</span>`}
+            ${kindLabel && html`<span class="link-source">${kindLabel}</span>`}
+          </span>
+          ${canEdit && html`<button class="icon" aria-label="Remove link" onClick=${() => remove(l, i)}>✕</button>`}
+        </li>`;
+      })}
     </ul>
     ${!items.length && !canEdit && html`<p class="empty">No links or files.</p>`}
     ${canEdit && html`
       <form class="link-form" onSubmit=${addLink}>
-        <input placeholder="Label (e.g. OSF, Overleaf, data folder)" value=${label} onInput=${(e) => setLabel(e.target.value)} />
-        <input placeholder="https://…" value=${url} onInput=${(e) => setUrl(e.target.value)} />
+        <input class="link-url" placeholder="Paste a OneDrive or SharePoint link (Share → Copy link)" value=${url} onInput=${(e) => setUrl(e.target.value)} aria-label="Link address" />
+        <input placeholder="Label (optional, e.g. Manuscript draft)" value=${label} onInput=${(e) => setLabel(e.target.value)} aria-label="Link label" />
         <button class="ghost">Add link</button>
       </form>
+      <p class="hint">Working documents belong in OneDrive so everyone can edit together. Make sure the document is shared with the people on this project.</p>
       <div class="upload-row">
         <input ref=${fileInput} type="file" multiple hidden onChange=${(e) => upload(e.target.files)} />
         <button type="button" class="ghost" disabled=${!!uploading} onClick=${() => fileInput.current.click()}>

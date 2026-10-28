@@ -270,7 +270,26 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; position: 
 
 /* Links & files (inside Overview) */
 .links-block { margin-top: 4px; }
-.link-icon { width: 18px; text-align: center; flex: none; }
+.links-block .links li { align-items: flex-start; padding: 6px 0; }
+.link-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.link-text a, .link-text .file-link { overflow-wrap: anywhere; }
+.link-source { font-size: 11.5px; color: var(--muted); }
+.link-form .link-url { flex: 2 1 260px; }
+
+/* Document-type badges (generic letters, not product logos) */
+.doc-badge {
+  flex: none; width: 26px; height: 26px; border-radius: 6px; display: inline-grid; place-items: center;
+  font-size: 12px; font-weight: 800; color: #fff; background: var(--muted); margin-top: 1px;
+}
+.doc-word { background: #2b5fb4; }
+.doc-excel { background: #1e7a46; }
+.doc-powerpoint { background: #c8502a; }
+.doc-pdf { background: #b42318; font-size: 9px; letter-spacing: 0.02em; }
+.doc-onenote { background: #7a3fa8; }
+.doc-doc { background: #3b78e7; }
+.doc-sheet { background: #188038; }
+.doc-slides { background: #e8a600; }
+.doc-folder, .doc-link, .doc-file { background: var(--col); color: var(--ink); font-size: 14px; }
 .file-link { padding: 0; color: var(--accent); font-weight: 500; text-align: left; overflow-wrap: anywhere; }
 .file-link:hover { text-decoration: underline; }
 .upload-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
