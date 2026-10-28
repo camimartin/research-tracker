@@ -38,6 +38,12 @@ function timeAgo(iso) {
   return new Date(iso).toLocaleDateString();
 }
 
+// "Oct 28, 2026 · 2:15 PM" in the viewer's own time zone.
+function fmtStamp(iso) {
+  const d = new Date(iso);
+  return `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })} · ${d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
+}
+
 function initials(who) {
   const name = (who || '?').split('@')[0];
   const parts = name.split(/[\s._-]+/).filter(Boolean);
@@ -760,7 +766,10 @@ function Notes({ p, data, canEdit, user, api }) {
       ${notes.map((n) => html`<li key=${n.id}>
         <div class="note-head">
           <${Avatar} who=${n.author_email} /><strong>${n.author_email === user.email ? 'You' : shortName(n.author_email)}</strong>
-          <span class="muted" title=${new Date(n.created_at).toLocaleString()}>${timeAgo(n.created_at)}</span>
+          <span class="muted note-time">
+            <time datetime=${n.created_at}>${fmtStamp(n.created_at)}</time>
+            ${Date.now() - new Date(n.created_at) < 7 * 864e5 && html` · ${timeAgo(n.created_at)}`}
+          </span>
           ${(user.isAdmin || (canEdit && n.author_email === user.email)) && html`<button class="icon" aria-label="Delete note"
             onClick=${() => confirm('Delete this note?') && api.remove('notes', n.id)}>✕</button>`}
         </div>
