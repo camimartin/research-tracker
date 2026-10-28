@@ -2,7 +2,7 @@ import { h, render } from 'preact';
 import { useState, useEffect, useMemo, useRef, useCallback } from 'preact/hooks';
 import htm from 'htm';
 import { CONFIG } from './config.js';
-import { createStore } from './store.js';
+import { createStore, MAX_FILE_BYTES } from './store.js';
 
 const html = htm.bind(h);
 const EMPTY = { projects: [], project_members: [], tasks: [], notes: [], submissions: [], owners: [] };
@@ -217,6 +217,10 @@ function App({ store }) {
       return run(() => store.update(table, id, patch));
     },
     remove: (table, id) => run(() => store.remove(table, id)),
+    uploadFile: (projectId, file) => store.uploadFile(projectId, file),
+    fileUrl: (path) => store.fileUrl(path),
+    removeFiles: (paths) => store.removeFiles(paths),
+    notify,
   }), []);
 
   const createItem = async (kind) => {
@@ -242,8 +246,10 @@ function App({ store }) {
   };
 
   const deleteProject = (p) => {
-    if (!confirm(`Delete "${p.title}" and all of its tasks, notes and submissions? This cannot be undone.`)) return;
+    const files = (p.links || []).filter((l) => l.type === 'file').map((l) => l.path);
+    if (!confirm(`Delete "${p.title}" and all of its tasks, notes, submissions${files.length ? ` and ${files.length} uploaded file(s)` : ''}? This cannot be undone.`)) return;
     open(null);
+    store.removeFiles(files).catch(() => {}); // leftover files are harmless; don't block the delete
     api.remove('projects', p.id);
   };
 
@@ -646,12 +652,12 @@ function ProjectDetail({ p, data, role, user, api, onClose, onDelete }) {
               <label class="field"><span>Target date</span><${DateInput} value=${p.target_date} disabled=${!canEdit} onSave=${(v) => save({ target_date: v })} /></label>
               <label class="field"><span>Tags</span><${TagsInput} p=${p} canEdit=${canEdit} save=${save} /></label>
             </div>`}
+          <${LinksAndFiles} p=${p} canEdit=${canEdit} save=${save} api=${api} />
         </${Section}>
 
         <${Tasks} p=${p} data=${data} canEdit=${canEdit} api=${api} people=${people} me=${user.email} />
-        <${Notes} p=${p} data=${data} canEdit=${canEdit} user=${user} api=${api} />
+        <${Notes} p=${p} data=${data} canEdit=${canEdit} user=${user} api=${api} people=${people} />
         <${Submissions} p=${p} kind=${kind} data=${data} canEdit=${canEdit} api=${api} />
-        <${Links} p=${p} canEdit=${canEdit} save=${save} />
         <${People} p=${p} members=${members} isAdmin=${isAdmin} api=${api} />
 
         ${isAdmin && html`<div class="danger-zone">
@@ -748,18 +754,89 @@ function TaskRow({ t, subtasks = [], depth = 0, canEdit, api, people, me, onAddS
   </li>`;
 }
 
-function Notes({ p, data, canEdit, user, api }) {
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Everyone a note tags, as emails: "@alex.rivera" matches alex.rivera@….
+function findMentions(body, people) {
+  return people.filter((email) => new RegExp(`(^|\\s)@${escapeRe(shortName(email))}(?![\\w-])`, 'i').test(body));
+}
+
+// Note text with clickable web addresses and highlighted @mentions.
+function NoteBody({ body, mentions = [], me }) {
+  const byName = new Map(mentions.map((e) => [shortName(e).toLowerCase(), e]));
+  const parts = body.split(/(https?:\/\/[^\s<>"]+|@[\w.-]+)/g);
+  return html`<p>${parts.map((part, i) => {
+    if (i % 2 === 0) return part;
+    const trail = part.match(/[.,;:!?)]+$/)?.[0] || ''; // keep sentence punctuation outside the link/mention
+    const core = trail ? part.slice(0, -trail.length) : part;
+    if (core.startsWith('@')) {
+      const email = byName.get(core.slice(1).toLowerCase());
+      return email
+        ? html`<span class="mention ${email === me ? 'me' : ''}" title=${email}>${core}</span>${trail}`
+        : part;
+    }
+    return safeUrl(core) ? html`<a href=${core} target="_blank" rel="noopener noreferrer">${core}</a>${trail}` : part;
+  })}</p>`;
+}
+
+// Note box with an @-picker: type "@" and choose from the people on this project.
+function MentionBox({ value, onChange, people, onSubmit, ...rest }) {
+  const [menu, setMenu] = useState(null); // { start, query }
+  const [active, setActive] = useState(0);
+  const ref = useRef();
+  const q = menu?.query.toLowerCase() ?? '';
+  const matches = menu ? people.filter((e) => shortName(e).toLowerCase().startsWith(q) || e.startsWith(q)).slice(0, 6) : [];
+
+  const track = (text, caret) => {
+    const m = text.slice(0, caret).match(/(^|\s)@([\w.-]*)$/);
+    setMenu(m ? { start: caret - m[2].length - 1, query: m[2] } : null);
+    setActive(0);
+  };
+
+  const pick = (email) => {
+    const el = ref.current;
+    const before = value.slice(0, menu.start);
+    const insert = `@${shortName(email)} `;
+    onChange(before + insert + value.slice(el.selectionStart));
+    setMenu(null);
+    requestAnimationFrame(() => { el.focus(); el.setSelectionRange(before.length + insert.length, before.length + insert.length); });
+  };
+
+  return html`<div class="mention-wrap">
+    <textarea ref=${ref} ...${rest} value=${value}
+      onInput=${(e) => { onChange(e.target.value); track(e.target.value, e.target.selectionStart); }}
+      onKeyDown=${(e) => {
+        if (matches.length) {
+          if (e.key === 'ArrowDown') { e.preventDefault(); setActive((active + 1) % matches.length); return; }
+          if (e.key === 'ArrowUp') { e.preventDefault(); setActive((active - 1 + matches.length) % matches.length); return; }
+          if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); pick(matches[active]); return; }
+          if (e.key === 'Escape') { e.stopPropagation(); setMenu(null); return; }
+        }
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) onSubmit();
+      }}
+      onBlur=${() => setTimeout(() => setMenu(null), 150)}></textarea>
+    ${matches.length > 0 && html`<ul class="mention-menu" role="listbox" aria-label="People on this project">
+      ${matches.map((e, i) => html`<li role="option" aria-selected=${i === active} class=${i === active ? 'on' : ''}
+        onMouseDown=${(ev) => { ev.preventDefault(); pick(e); }}>
+        <${Avatar} who=${e} /><strong>${shortName(e)}</strong><span class="muted">${e}</span>
+      </li>`)}
+    </ul>`}
+  </div>`;
+}
+
+function Notes({ p, data, canEdit, user, api, people = [] }) {
   const [draft, setDraft] = useState('');
   const notes = data.notes.filter((n) => n.project_id === p.id).sort((a, b) => b.created_at.localeCompare(a.created_at));
   const add = () => {
-    if (!draft.trim()) return;
-    api.insert('notes', { project_id: p.id, body: draft.trim(), author_email: user.email });
+    const body = draft.trim();
+    if (!body) return;
+    api.insert('notes', { project_id: p.id, body, author_email: user.email, mentions: findMentions(body, people) });
     setDraft('');
   };
   return html`<${Section} title="Notes" aside=${notes.length ? String(notes.length) : ''}>
     ${canEdit && html`<div class="note-new">
-      <textarea rows="2" placeholder="Meeting notes, decisions, updates…  (⌘/Ctrl + Enter to post)" value=${draft}
-        onInput=${(e) => setDraft(e.target.value)} onKeyDown=${(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) add(); }}></textarea>
+      <${MentionBox} rows="2" placeholder="Meeting notes, decisions, updates… Type @ to tag someone. (⌘/Ctrl + Enter to post)"
+        value=${draft} onChange=${setDraft} people=${people} onSubmit=${add} aria-label="New note" />
       <button class="primary" disabled=${!draft.trim()} onClick=${add}>Post</button>
     </div>`}
     <ul class="notes">
@@ -773,7 +850,7 @@ function Notes({ p, data, canEdit, user, api }) {
           ${(user.isAdmin || (canEdit && n.author_email === user.email)) && html`<button class="icon" aria-label="Delete note"
             onClick=${() => confirm('Delete this note?') && api.remove('notes', n.id)}>✕</button>`}
         </div>
-        <p>${n.body}</p>
+        <${NoteBody} body=${n.body} mentions=${n.mentions} me=${user.email} />
       </li>`)}
     </ul>
     ${!notes.length && !canEdit && html`<p class="empty">No notes.</p>`}
@@ -813,33 +890,95 @@ function Submissions({ p, kind, data, canEdit, api }) {
   </${Section}>`;
 }
 
-function Links({ p, canEdit, save }) {
+function fmtBytes(n) {
+  if (n == null) return '';
+  if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// Links and uploaded files share the project's `links` list; files carry
+// { type: 'file', path, name, size } and live in private storage.
+function LinksAndFiles({ p, canEdit, save, api }) {
   const [label, setLabel] = useState('');
   const [url, setUrl] = useState('');
-  const links = p.links || [];
-  const add = (e) => {
+  const [uploading, setUploading] = useState('');
+  const fileInput = useRef();
+  const items = p.links || [];
+
+  const addLink = (e) => {
     e.preventDefault();
     let u = url.trim();
     if (!u) return;
     if (!/^[a-z]+:\/\//i.test(u)) u = 'https://' + u;
     if (!safeUrl(u)) return;
-    save({ links: [...links, { label: label.trim() || u.replace(/^https?:\/\//, ''), url: u }] });
+    save({ links: [...items, { label: label.trim() || u.replace(/^https?:\/\//, ''), url: u }] });
     setLabel('');
     setUrl('');
   };
-  return html`<${Section} title="Links & files" aside=${links.length ? String(links.length) : ''}>
+
+  const upload = async (fileList) => {
+    const files = [...fileList];
+    fileInput.current.value = '';
+    const tooBig = files.filter((f) => f.size > MAX_FILE_BYTES);
+    if (tooBig.length) api.notify(`${tooBig.map((f) => f.name).join(', ')} is over the 50 MB limit and wasn't uploaded.`);
+    const added = [];
+    for (const f of files.filter((f) => f.size <= MAX_FILE_BYTES)) {
+      setUploading(f.name);
+      try { added.push({ type: 'file', ...(await api.uploadFile(p.id, f)) }); }
+      catch (e) { api.notify(`Couldn't upload ${f.name}: ${e.message || e}`); }
+    }
+    setUploading('');
+    if (added.length) save({ links: [...(p.links || []), ...added] });
+  };
+
+  // Open the tab right away (browsers block pop-ups opened after a wait), then point it at the signed link.
+  const openFile = async (item) => {
+    const tab = window.open('', '_blank');
+    try {
+      const href = await api.fileUrl(item.path);
+      if (tab) tab.location.href = href; else location.href = href;
+    } catch (e) {
+      tab?.close();
+      api.notify(`Couldn't open ${item.name}: ${e.message || e}`);
+    }
+  };
+
+  const remove = async (item, i) => {
+    if (item.type === 'file') {
+      if (!confirm(`Delete the file "${item.name}"? This cannot be undone.`)) return;
+      try { await api.removeFiles([item.path]); } catch (e) { return api.notify(`Couldn't delete ${item.name}: ${e.message || e}`); }
+    }
+    save({ links: items.filter((_, j) => j !== i) });
+  };
+
+  return html`<div class="field links-block">
+    <span>Links & files${items.length ? ` (${items.length})` : ''}</span>
     <ul class="links">
-      ${links.map((l, i) => html`<li>
-        ${safeUrl(l.url) ? html`<a href=${l.url} target="_blank" rel="noopener noreferrer">${l.label}</a>` : html`<span>${l.label}</span>`}
-        ${canEdit && html`<button class="icon" aria-label="Remove link" onClick=${() => save({ links: links.filter((_, j) => j !== i) })}>✕</button>`}
+      ${items.map((l, i) => html`<li key=${l.path || l.url || i}>
+        ${l.type === 'file'
+          ? html`<span class="link-icon" aria-hidden="true">📄</span>
+              <button class="file-link" onClick=${() => openFile(l)}>${l.name}</button>
+              <span class="muted small">${fmtBytes(l.size)}</span>`
+          : html`<span class="link-icon" aria-hidden="true">🔗</span>
+              ${safeUrl(l.url) ? html`<a href=${l.url} target="_blank" rel="noopener noreferrer">${l.label}</a>` : html`<span>${l.label}</span>`}`}
+        ${canEdit && html`<button class="icon" aria-label=${l.type === 'file' ? 'Delete file' : 'Remove link'} onClick=${() => remove(l, i)}>✕</button>`}
       </li>`)}
     </ul>
-    ${canEdit ? html`<form class="link-form" onSubmit=${add}>
-      <input placeholder="Label (e.g. OSF, Overleaf, data folder)" value=${label} onInput=${(e) => setLabel(e.target.value)} />
-      <input placeholder="https://…" value=${url} onInput=${(e) => setUrl(e.target.value)} />
-      <button class="ghost">Add</button>
-    </form>` : !links.length && html`<p class="empty">No links.</p>`}
-  </${Section}>`;
+    ${!items.length && !canEdit && html`<p class="empty">No links or files.</p>`}
+    ${canEdit && html`
+      <form class="link-form" onSubmit=${addLink}>
+        <input placeholder="Label (e.g. OSF, Overleaf, data folder)" value=${label} onInput=${(e) => setLabel(e.target.value)} />
+        <input placeholder="https://…" value=${url} onInput=${(e) => setUrl(e.target.value)} />
+        <button class="ghost">Add link</button>
+      </form>
+      <div class="upload-row">
+        <input ref=${fileInput} type="file" multiple hidden onChange=${(e) => upload(e.target.files)} />
+        <button type="button" class="ghost" disabled=${!!uploading} onClick=${() => fileInput.current.click()}>
+          ${uploading ? `Uploading ${uploading}…` : '⬆ Upload file'}
+        </button>
+        <span class="muted small">Up to 50 MB each. No participant or identifiable data.</span>
+      </div>`}
+  </div>`;
 }
 
 function People({ p, members, isAdmin, api }) {

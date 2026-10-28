@@ -5,11 +5,19 @@
 //   loadAll() → { projects, project_members, tasks, notes, submissions, owners }
 //   insert(table, row) → row   update(table, id, patch)   remove(table, id)
 //   subscribe(cb) → unsubscribe   (cb fires whenever anyone changes data)
+//   uploadFile(projectId, file) → { path, name, size }   fileUrl(path) → url   removeFiles(paths)
 
 import { CONFIG } from './config.js';
 import { demoSeed } from './demo-data.js';
 
 export const TABLES = ['projects', 'project_members', 'tasks', 'notes', 'submissions'];
+
+export const MAX_FILE_BYTES = 50 * 1024 * 1024; // Supabase free-plan limit per file
+const BUCKET = 'project-files';
+
+// Storage keys allow only a safe set of characters; the original name is kept separately.
+const fileKey = (projectId, name) =>
+  `${projectId}/${crypto.randomUUID()}-${name.replace(/[^\w.\- ]+/g, '_').slice(-120)}`;
 
 // Add ?demo to the address to try the sample data even when Supabase is configured.
 export function createStore() {
@@ -101,6 +109,26 @@ class SupabaseStore {
     if (!data.length) throw new Error("You don't have permission to delete that.");
   }
 
+  async uploadFile(projectId, file) {
+    const path = fileKey(projectId, file.name);
+    const { error } = await this.sb.storage.from(BUCKET).upload(path, file, { contentType: file.type || undefined });
+    if (error) throw error;
+    return { path, name: file.name, size: file.size };
+  }
+
+  // Files are private, so each open gets a short-lived signed link.
+  async fileUrl(path) {
+    const { data, error } = await this.sb.storage.from(BUCKET).createSignedUrl(path, 3600);
+    if (error) throw error;
+    return data.signedUrl;
+  }
+
+  async removeFiles(paths) {
+    if (!paths.length) return;
+    const { error } = await this.sb.storage.from(BUCKET).remove(paths);
+    if (error) throw error;
+  }
+
   subscribe(cb) {
     const channel = this.sb.channel('tracker-changes');
     for (const table of TABLES) {
@@ -126,7 +154,7 @@ const DEFAULTS = {
   },
   project_members: { role: 'editor' },
   tasks: { parent_id: null, title: '', done: false, assignee: '', due_date: null, position: 0 },
-  notes: { body: '' },
+  notes: { body: '', mentions: [] },
   submissions: { journal: '', submitted_on: null, decision: 'Under review', decision_on: null, comments: '' },
 };
 
@@ -183,6 +211,26 @@ class DemoStore {
   async verifyCode() {}
   async signOut() {}
   subscribe(cb) { this.listeners.add(cb); return () => this.listeners.delete(cb); }
+
+  // Demo files live only in this tab's memory (browser storage is too small for files).
+  demoFiles = new Map();
+
+  async uploadFile(projectId, file) {
+    this.check('projects', { id: projectId }, 'update');
+    const path = fileKey(projectId, file.name);
+    this.demoFiles.set(path, URL.createObjectURL(file));
+    return { path, name: file.name, size: file.size };
+  }
+
+  async fileUrl(path) {
+    const url = this.demoFiles.get(path);
+    if (!url) throw new Error('In demo mode, uploaded files are only kept until the page is reloaded.');
+    return url;
+  }
+
+  async removeFiles(paths) {
+    for (const p of paths) { URL.revokeObjectURL(this.demoFiles.get(p)); this.demoFiles.delete(p); }
+  }
 
   async loadAll() {
     const d = this.db();
